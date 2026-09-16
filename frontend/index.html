@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ledger — AWS Cost Insights</title>
+<script>
+  // Load Chart.js dynamically with a fallback CDN, so a single unreachable
+  // host (corporate proxy, ad-blocker, offline dev network, etc.) doesn't
+  // silently break the whole dashboard. window.chartReady always resolves
+  // (never rejects) — code that uses Chart checks typeof Chart first.
+  function loadScript(src) {
+    return new Promise((resolve, reject) => {
+      const s = document.createElement("script");
+      s.src = src;
+      s.onload = resolve;
+      s.onerror = reject;
+      document.head.appendChild(s);
+    });
+  }
+window.chartReady = loadScript(
+  "https://cdn.jsdelivr.net/npm/chart.js"
+)
+.catch(() =>
+  loadScript("https://unpkg.com/chart.js")
+)
+.catch(() =>
+  console.warn("Chart.js failed to load.")
+);
+</script>
+<style>
+  :root{
+    --bg:#0B1220;
+    --surface:#121A2B;
+    --surface-2:#182238;
+    --border:#26324A;
+    --text:#E8ECF4;
+    --text-dim:#8B97AE;
+    --amber:#F2A93B;
+    --amber-dim:#8A6423;
+    --emerald:#35C98F;
+    --red:#EF5B5B;
+    --mono: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+    --sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0; background:var(--bg); color:var(--text);
+    font-family:var(--sans); -webkit-font-smoothing:antialiased;
+  }
+  header{
+    display:flex; align-items:center; justify-content:space-between;
+    padding:20px 32px; border-bottom:1px solid var(--border);
+    position:sticky; top:0; background:rgba(11,18,32,0.92); backdrop-filter:blur(8px); z-index:10;
+  }
+  .brand{display:flex; align-items:center; gap:10px;}
+  .brand .mark{
+    width:26px; height:26px; border:1.5px solid var(--amber); border-radius:4px;
+    display:flex; align-items:center; justify-content:center; color:var(--amber);
+    font-family:var(--mono); font-size:13px; font-weight:700; transform:rotate(0deg);
+  }
+  .brand h1{font-size:16px; font-weight:600; margin:0; letter-spacing:0.2px;}
+  .brand .sub{color:var(--text-dim); font-size:12px; font-family:var(--mono);}
+
+  select#uploadSelect{
+    background:var(--surface-2); color:var(--text); border:1px solid var(--border);
+    border-radius:6px; padding:8px 10px; font-family:var(--mono); font-size:12.5px; max-width:340px;
+  }
+
+  main{max-width:1180px; margin:0 auto; padding:28px 32px 80px;}
+
+  .uploader{
+    border:1.5px dashed var(--border); border-radius:10px; padding:28px;
+    display:flex; align-items:center; justify-content:space-between; gap:20px;
+    background:var(--surface); margin-bottom:28px; transition:border-color .15s ease;
+  }
+  .uploader.drag{border-color:var(--amber);}
+  .uploader .left{display:flex; align-items:center; gap:16px;}
+  .uploader .icon{
+    width:44px; height:44px; border-radius:8px; background:var(--surface-2);
+    display:flex; align-items:center; justify-content:center; color:var(--amber); font-size:20px; flex-shrink:0;
+  }
+  .uploader h3{margin:0 0 4px; font-size:14.5px;}
+  .uploader p{margin:0; color:var(--text-dim); font-size:12.5px;}
+  .btn{
+    background:var(--amber); color:#1a1200; border:none; border-radius:6px;
+    padding:10px 18px; font-weight:600; font-size:13px; cursor:pointer; white-space:nowrap;
+  }
+  .btn:hover{background:#ffbd54;}
+  .btn:disabled{opacity:0.5; cursor:not-allowed;}
+  #fileInput{display:none;}
+  #uploadStatus{font-family:var(--mono); font-size:12px; color:var(--text-dim); margin-top:10px;}
+
+  .kpis{display:grid; grid-template-columns:repeat(4,1fr); gap:14px; margin-bottom:28px;}
+  .kpi{background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:18px;}
+  .kpi .label{font-size:11.5px; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.6px; margin-bottom:8px;}
+  .kpi .value{font-family:var(--mono); font-size:22px; font-weight:600;}
+  .kpi .value.amber{color:var(--amber);}
+  .kpi .value.emerald{color:var(--emerald);}
+
+  .grid-2{display:grid; grid-template-columns:1.3fr 1fr; gap:16px; margin-bottom:16px;}
+  @media(max-width:920px){.grid-2{grid-template-columns:1fr;} .kpis{grid-template-columns:repeat(2,1fr);}}
+
+  .panel{background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:20px;}
+  .panel h2{
+    font-size:12.5px; text-transform:uppercase; letter-spacing:0.6px; color:var(--text-dim);
+    margin:0 0 16px; font-weight:600;
+  }
+  .chart-box{position:relative; height:260px; width:100%;}
+
+  table{width:100%; border-collapse:collapse; font-size:13px;}
+  th{
+    text-align:left; color:var(--text-dim); font-size:11px; text-transform:uppercase;
+    letter-spacing:0.4px; padding:6px 8px; border-bottom:1px solid var(--border); font-weight:600;
+  }
+  td{padding:8px; border-bottom:1px solid var(--surface-2); font-family:var(--mono); font-size:12.5px;}
+  td.num{text-align:right; color:var(--amber);}
+  tr:last-child td{border-bottom:none;}
+
+  .rec{
+    border:1px solid var(--border); border-left:3px solid var(--amber-dim); border-radius:8px;
+    padding:16px 18px; margin-bottom:12px; background:var(--surface-2);
+  }
+  .rec.high{border-left-color:var(--red);}
+  .rec.medium{border-left-color:var(--amber);}
+  .rec.low{border-left-color:var(--emerald);}
+  .rec.info{border-left-color:var(--text-dim);}
+  .rec-head{display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:6px;}
+  .rec-head h4{margin:0; font-size:14px;}
+  .badge{
+    font-family:var(--mono); font-size:10.5px; text-transform:uppercase; padding:3px 8px;
+    border-radius:20px; letter-spacing:0.4px; flex-shrink:0;
+  }
+  .badge.high{background:rgba(239,91,91,0.15); color:var(--red);}
+  .badge.medium{background:rgba(242,169,59,0.15); color:var(--amber);}
+  .badge.low{background:rgba(53,201,143,0.15); color:var(--emerald);}
+  .badge.info{background:rgba(139,151,174,0.15); color:var(--text-dim);}
+  .rec p{margin:4px 0; font-size:13px; color:#C7CEDC; line-height:1.5;}
+  .rec .impact{font-family:var(--mono); color:var(--amber); font-size:12px; margin-top:8px;}
+
+  .empty{color:var(--text-dim); text-align:center; padding:60px 20px; font-family:var(--mono); font-size:13px;}
+  section{margin-bottom:16px;}
+  .section-title{font-size:12.5px; text-transform:uppercase; letter-spacing:0.6px; color:var(--text-dim); margin:32px 0 12px; font-weight:600;}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="brand">
+    <div class="mark">$</div>
+    <div>
+      <h1>Ledger</h1>
+      <div class="sub">AWS Cost & Usage Insights</div>
+    </div>
+  </div>
+  <select id="uploadSelect"><option value="">All uploads (combined)</option></select>
+</header>
+
+<main>
+  <div class="uploader" id="dropzone">
+    <div class="left">
+      <div class="icon">⇪</div>
+      <div>
+        <h3>Upload a CUR CSV export</h3>
+        <p>Drag & drop, or select a file. Processed straight into Postgres — nothing leaves this app.</p>
+        <div id="uploadStatus"></div>
+      </div>
+    </div>
+    <div>
+      <input type="file" id="fileInput" accept=".csv">
+      <button class="btn" id="pickBtn">Choose file</button>
+    </div>
+  </div>
+
+  <div id="content">
+    <div class="empty">No data yet — upload a CUR CSV to see cost insights.</div>
+  </div>
+</main>
+
+<script>
+const API = window.__APP_CONFIG__?.API_URL || "http://api-cloud-cost.local/api";
+let charts = {};
+
+document.getElementById("pickBtn").onclick = () => document.getElementById("fileInput").click();
+document.getElementById("fileInput").onchange = (e) => { if(e.target.files[0]) doUpload(e.target.files[0]); };
+
+const dz = document.getElementById("dropzone");
+["dragenter","dragover"].forEach(ev => dz.addEventListener(ev, e => { e.preventDefault(); dz.classList.add("drag"); }));
+["dragleave","drop"].forEach(ev => dz.addEventListener(ev, e => { e.preventDefault(); dz.classList.remove("drag"); }));
+dz.addEventListener("drop", e => { const f = e.dataTransfer.files[0]; if(f) doUpload(f); });
+
+async function doUpload(file){
+  const statusEl = document.getElementById("uploadStatus");
+  statusEl.textContent = `Uploading ${file.name}...`;
+  const fd = new FormData();
+  fd.append("file", file);
+  try{
+    const res = await fetch(`${API}/upload`, { method:"POST", body:fd });
+    const data = await res.json();
+    if(!res.ok){ statusEl.textContent = `Error: ${data.detail || "upload failed"}`; return; }
+    if(data.status === "failed"){ statusEl.textContent = `Failed: ${data.error_message}`; return; }
+    statusEl.textContent = `Loaded ${data.row_count.toLocaleString()} rows — $${data.total_unblended_cost.toLocaleString(undefined,{minimumFractionDigits:2})} total.`;
+    await loadUploads();
+    document.getElementById("uploadSelect").value = data.id;
+    await renderAll(data.id);
+  }catch(err){
+    statusEl.textContent = "Upload failed: " + err.message;
+  }
+}
+
+async function loadUploads(){
+  const res = await fetch(`${API}/uploads`);
+  const uploads = await res.json();
+  const sel = document.getElementById("uploadSelect");
+  const current = sel.value;
+  sel.innerHTML = `<option value="">All uploads (combined)</option>` + uploads.map(u =>
+    `<option value="${u.id}">${u.filename} — ${u.status} — $${u.total_unblended_cost.toLocaleString(undefined,{minimumFractionDigits:0})}</option>`
+  ).join("");
+  sel.value = current || "";
+  return uploads;
+}
+
+document.getElementById("uploadSelect").onchange = (e) => renderAll(e.target.value || null);
+
+function qs(uploadId){ return uploadId ? `?upload_id=${uploadId}` : ""; }
+
+async function fetchJSON(path, uploadId){
+  const res = await fetch(`${API}${path}${qs(uploadId)}`);
+  return res.json();
+}
+
+async function renderAll(uploadId){
+  const [summary, byService, byAccount, byRegion, trendData, byType, topResources, recs] = await Promise.all([
+    fetchJSON("/insights/summary", uploadId),
+    fetchJSON("/insights/by-service", uploadId),
+    fetchJSON("/insights/by-account", uploadId),
+    fetchJSON("/insights/by-region", uploadId),
+    fetchJSON("/insights/trend", uploadId),
+    fetchJSON("/insights/by-line-item-type", uploadId),
+    fetchJSON("/insights/top-resources", uploadId),
+    fetchJSON("/insights/recommendations", uploadId),
+  ]);
+
+  if(!summary.total_rows){
+    document.getElementById("content").innerHTML = `<div class="empty">No data yet — upload a CUR CSV to see cost insights.</div>`;
+    return;
+  }
+
+  const fmt = (n) => `$${Number(n).toLocaleString(undefined,{minimumFractionDigits:2, maximumFractionDigits:2})}`;
+
+  document.getElementById("content").innerHTML = `
+    <div class="kpis">
+      <div class="kpi"><div class="label">Total Cost</div><div class="value amber">${fmt(summary.total_cost)}</div></div>
+      <div class="kpi"><div class="label">Line Items</div><div class="value">${summary.total_rows.toLocaleString()}</div></div>
+      <div class="kpi"><div class="label">Services</div><div class="value">${summary.distinct_services}</div></div>
+      <div class="kpi"><div class="label">Credits & Refunds</div><div class="value emerald">${fmt(summary.credits_and_refunds)}</div></div>
+    </div>
+
+    <div class="grid-2">
+      <div class="panel"><h2>Daily Cost Trend</h2><div class="chart-box"><canvas id="trendChart"></canvas></div></div>
+      <div class="panel"><h2>Cost by Line Item Type</h2><div class="chart-box"><canvas id="typeChart"></canvas></div></div>
+    </div>
+
+    <div class="grid-2">
+      <div class="panel">
+        <h2>Top Services</h2>
+        <table><thead><tr><th>Service</th><th style="text-align:right">Cost</th><th style="text-align:right">% of total</th></tr></thead>
+        <tbody>${byService.map(s => `<tr><td style="font-family:var(--sans)">${s.service}</td><td class="num">${fmt(s.cost)}</td><td class="num">${s.pct_of_total}%</td></tr>`).join("")}</tbody></table>
+      </div>
+      <div class="panel"><h2>Cost by Service (share)</h2><div class="chart-box"><canvas id="serviceChart"></canvas></div></div>
+    </div>
+
+    <div class="grid-2">
+      <div class="panel">
+        <h2>Cost by Account</h2>
+        <table><thead><tr><th>Account</th><th style="text-align:right">Cost</th></tr></thead>
+        <tbody>${byAccount.slice(0,10).map(a => `<tr><td>${a.account_id}</td><td class="num">${fmt(a.cost)}</td></tr>`).join("")}</tbody></table>
+      </div>
+      <div class="panel">
+        <h2>Cost by Region</h2>
+        <table><thead><tr><th>Region</th><th style="text-align:right">Cost</th></tr></thead>
+        <tbody>${byRegion.slice(0,10).map(r => `<tr><td>${r.region}</td><td class="num">${fmt(r.cost)}</td></tr>`).join("")}</tbody></table>
+      </div>
+    </div>
+
+    <div class="panel" style="margin-bottom:16px;">
+      <h2>Top Cost-Driving Resources</h2>
+      <table><thead><tr><th>Resource ID</th><th>Service</th><th style="text-align:right">Cost</th></tr></thead>
+      <tbody>${topResources.slice(0,15).map(r => `<tr><td>${r.resource_id}</td><td>${r.service}</td><td class="num">${fmt(r.cost)}</td></tr>`).join("") || `<tr><td colspan="3" style="color:var(--text-dim); font-family:var(--sans)">No resource-level detail in this CUR export.</td></tr>`}</tbody></table>
+    </div>
+
+    <div class="section-title">Recommendations — where to act</div>
+    <div id="recs">
+      ${recs.length ? recs.map(r => `
+        <div class="rec ${r.severity}">
+          <div class="rec-head"><h4>${r.title}</h4><span class="badge ${r.severity}">${r.severity}</span></div>
+          <p>${r.finding}</p>
+          <p>${r.recommendation}</p>
+          <div class="impact">~${fmt(Math.abs(r.impact_cost))} (${Math.abs(r.impact_pct)}% of spend)</div>
+        </div>
+      `).join("") : `<div class="empty">No notable cost patterns flagged for this dataset.</div>`}
+    </div>
+  `;
+
+  // Charts are a progressive enhancement — if Chart.js didn't load (CDN
+  // blocked, offline network, etc.) the rest of the dashboard still works,
+  // and this must never throw back into doUpload()'s try/catch.
+  drawCharts(trendData, byType, byService).catch(err => console.warn("Charts unavailable:", err));
+}
+
+async function drawCharts(trendData, byType, byService){
+  await window.chartReady;
+  if (typeof Chart === "undefined") {
+    document.querySelectorAll("#trendChart, #typeChart, #serviceChart").forEach(canvas => {
+      const msg = document.createElement("div");
+      msg.style.cssText = "color:var(--text-dim); font-family:var(--mono); font-size:12px; padding:20px 0;";
+      msg.textContent = "Chart library unavailable (offline or blocked CDN) — see tables above for the same data.";
+      canvas.replaceWith(msg);
+    });
+    return;
+  }
+
+  // Wait for the browser to finish laying out the grid we just inserted via
+  // innerHTML before measuring the canvases — creating a Chart.js instance
+  // in the same tick as the DOM insertion can measure a 0×0 container and
+  // render nothing. Two rAFs reliably land after layout+paint.
+  await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+
+  Object.values(charts).forEach(c => c.destroy());
+  const gridColor = "#26324A";
+  const textColor = "#8B97AE";
+  Chart.defaults.color = textColor;
+  Chart.defaults.font.family = "ui-monospace, monospace";
+  Chart.defaults.font.size = 11;
+
+  charts.trend = new Chart(document.getElementById("trendChart"), {
+    type: "line",
+    data: { labels: trendData.map(d=>d.date), datasets:[{
+      data: trendData.map(d=>d.cost), borderColor:"#F2A93B", backgroundColor:"rgba(242,169,59,0.12)",
+      fill:true, tension:0.3, pointRadius:0, borderWidth:2,
+    }]},
+    options: {
+      responsive:true, maintainAspectRatio:false,
+      plugins:{legend:{display:false}}, scales:{ x:{grid:{color:gridColor}}, y:{grid:{color:gridColor}} }
+    }
+  });
+
+  charts.type = new Chart(document.getElementById("typeChart"), {
+    type: "bar",
+    data: { labels: byType.map(t=>t.type), datasets:[{ data: byType.map(t=>t.cost), backgroundColor:"#F2A93B" }]},
+    options: {
+      responsive:true, maintainAspectRatio:false,
+      plugins:{legend:{display:false}}, scales:{ x:{grid:{display:false}}, y:{grid:{color:gridColor}} }
+    }
+  });
+
+  charts.service = new Chart(document.getElementById("serviceChart"), {
+    type: "doughnut",
+    data: { labels: byService.slice(0,8).map(s=>s.service), datasets:[{
+      data: byService.slice(0,8).map(s=>s.cost),
+      backgroundColor:["#F2A93B","#35C98F","#5B8DEF","#EF5B5B","#B682F2","#4FC3D9","#E8956B","#8B97AE"],
+      borderColor:"#121A2B", borderWidth:2,
+    }]},
+    options: {
+      responsive:true, maintainAspectRatio:false,
+      plugins:{legend:{position:"right", labels:{boxWidth:10, padding:10}}}
+    }
+  });
+}
+
+(async function init(){
+  const uploads = await loadUploads();
+  if(uploads.length) await renderAll(null);
+})();
+</script>
+</body>
+</html>
